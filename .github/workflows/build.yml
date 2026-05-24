@@ -1,0 +1,277 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Create Android project
+        run: |
+          rm -rf app
+          mkdir -p app/src/main/java/com/textile/aiscreenbridge app/src/main/res/xml app/src/main/res/values
+
+          cat > settings.gradle <<'GRADLE'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "AIScreenBridge"
+          include(":app")
+          GRADLE
+
+          cat > build.gradle <<'GRADLE'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+          }
+          GRADLE
+
+          cat > app/build.gradle <<'GRADLE'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.textile.aiscreenbridge"
+              compileSdk = 35
+              defaultConfig {
+                  applicationId = "com.textile.aiscreenbridge"
+                  minSdk = 26
+                  targetSdk = 35
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+          }
+          dependencies {
+              implementation("com.squareup.okhttp3:okhttp:4.12.0")
+              implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+          }
+          GRADLE
+
+          cat > app/src/main/res/values/strings.xml <<'XML'
+          <resources>
+              <string name="app_name">AI Screen Bridge</string>
+              <string name="accessibility_description">Permet à AI Screen Bridge de lire le texte visible à l'écran pour te guider avec une IA.</string>
+          </resources>
+          XML
+
+          cat > app/src/main/res/values/styles.xml <<'XML'
+          <resources>
+              <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:windowLightStatusBar">true</item>
+                  <item name="android:colorAccent">#222222</item>
+              </style>
+          </resources>
+          XML
+
+          cat > app/src/main/res/xml/accessibility_service_config.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:description="@string/accessibility_description"
+              android:accessibilityEventTypes="typeWindowContentChanged|typeWindowStateChanged|typeViewTextChanged|typeViewClicked|typeViewFocused"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:notificationTimeout="500"
+              android:canRetrieveWindowContent="true"
+              android:canPerformGestures="false"
+              android:canTakeScreenshot="false"
+              android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"/>
+          XML
+
+          cat > app/src/main/AndroidManifest.xml <<'XML'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+              <application android:theme="@style/AppTheme" android:label="AI Screen Bridge" android:allowBackup="false" android:usesCleartextTraffic="false">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <service android:name=".ScreenAccessibilityService" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE" android:exported="true">
+                      <intent-filter><action android:name="android.accessibilityservice.AccessibilityService"/></intent-filter>
+                      <meta-data android:name="android.accessibilityservice" android:resource="@xml/accessibility_service_config"/>
+                  </service>
+              </application>
+          </manifest>
+          XML
+
+          cat > app/src/main/java/com/textile/aiscreenbridge/MainActivity.kt <<'KOTLIN'
+          package com.textile.aiscreenbridge
+          import android.app.Activity
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.widget.*
+
+          class MainActivity : Activity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val prefs = getSharedPreferences("config", MODE_PRIVATE)
+                  val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(32,42,32,32) }
+                  val title = TextView(this).apply { text = "AI Screen Bridge"; textSize = 24f; gravity = Gravity.CENTER }
+                  val info = TextView(this).apply { text = "Lit le texte visible avec Accessibilité puis l'envoie à OpenAI ou Claude quand tu appuies sur la bulle AI."; textSize = 15f; setPadding(0,20,0,20) }
+                  val provider = Spinner(this).apply { adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, listOf("OpenAI / ChatGPT", "Anthropic / Claude")); setSelection(prefs.getInt("providerIndex", 0)) }
+                  val apiKey = EditText(this).apply { hint = "Clé API"; setSingleLine(true); setText(prefs.getString("apiKey", "")) }
+                  val model = EditText(this).apply { hint = "Modèle"; setSingleLine(true); setText(prefs.getString("model", "gpt-4.1-mini")) }
+                  val userPrompt = EditText(this).apply { hint = "Demande à l'IA"; minLines = 3; setText(prefs.getString("userPrompt", "Lis le contexte de mon écran et dis-moi exactement la prochaine action à faire.")) }
+                  val status = TextView(this).apply { text = "Enregistre, autorise la bulle flottante, puis active l'accessibilité."; setPadding(0,20,0,0) }
+                  val save = Button(this).apply { text = "Enregistrer"; setOnClickListener { prefs.edit().putInt("providerIndex", provider.selectedItemPosition).putString("apiKey", apiKey.text.toString().trim()).putString("model", model.text.toString().trim()).putString("userPrompt", userPrompt.text.toString().trim()).apply(); status.text = "Configuration enregistrée." } }
+                  val overlay = Button(this).apply { text = "Autoriser la bulle flottante"; setOnClickListener { if (!Settings.canDrawOverlays(this@MainActivity)) startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) } }
+                  val access = Button(this).apply { text = "Activer l'accessibilité"; setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) } }
+                  root.addView(title); root.addView(info); root.addView(provider); root.addView(apiKey); root.addView(model); root.addView(userPrompt); root.addView(save); root.addView(overlay); root.addView(access); root.addView(status)
+                  setContentView(root)
+              }
+          }
+          KOTLIN
+
+          cat > app/src/main/java/com/textile/aiscreenbridge/ScreenAccessibilityService.kt <<'KOTLIN'
+          package com.textile.aiscreenbridge
+          import android.accessibilityservice.AccessibilityService
+          import android.graphics.PixelFormat
+          import android.os.Build
+          import android.view.*
+          import android.view.accessibility.AccessibilityEvent
+          import android.widget.Button
+          import android.widget.TextView
+          import kotlinx.coroutines.*
+
+          class ScreenAccessibilityService : AccessibilityService() {
+              private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+              private var lastContext = ""
+              private var wm: WindowManager? = null
+              private var bubble: Button? = null
+              private var result: TextView? = null
+              private var lastSentAt = 0L
+              override fun onServiceConnected() { super.onServiceConnected(); createOverlay() }
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) { val root = rootInActiveWindow ?: return; val text = ScreenTextExtractor.extract(root); if (text.isNotBlank()) lastContext = PrivacyFilter.clean(text).take(5000) }
+              override fun onInterrupt() {}
+              private fun createOverlay() {
+                  wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                  val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE
+                  bubble = Button(this).apply { text = "AI"; setOnClickListener { askAi() } }
+                  result = TextView(this).apply { text = "AI Screen Bridge actif"; setPadding(16,12,16,12); visibility = View.GONE; setBackgroundColor(0xEEFFFFFF.toInt()) }
+                  try {
+                      wm?.addView(bubble, WindowManager.LayoutParams(160,160,type,WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,PixelFormat.TRANSLUCENT).apply { gravity = Gravity.TOP or Gravity.END; x=25; y=240 })
+                      wm?.addView(result, WindowManager.LayoutParams(WindowManager.LayoutParams.MATCH_PARENT,WindowManager.LayoutParams.WRAP_CONTENT,type,WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,PixelFormat.TRANSLUCENT).apply { gravity = Gravity.BOTTOM; y=80 })
+                  } catch (_: Exception) {}
+              }
+              private fun askAi() {
+                  if (System.currentTimeMillis() - lastSentAt < 3000) return
+                  lastSentAt = System.currentTimeMillis()
+                  if (lastContext.isBlank()) { show("Aucun texte lisible détecté."); return }
+                  val prefs = getSharedPreferences("config", MODE_PRIVATE)
+                  val key = prefs.getString("apiKey", "") ?: ""
+                  val model = prefs.getString("model", "gpt-4.1-mini") ?: "gpt-4.1-mini"
+                  val prompt = prefs.getString("userPrompt", "") ?: ""
+                  if (key.isBlank()) { show("Ajoute ta clé API dans l'application."); return }
+                  show("Analyse IA en cours...")
+                  scope.launch { val answer = if (prefs.getInt("providerIndex",0)==0) OpenAiClient.ask(key,model,prompt,lastContext) else ClaudeClient.ask(key,model,prompt,lastContext); show(answer) }
+              }
+              private fun show(text: String) { result?.visibility = View.VISIBLE; result?.text = text.take(1500) }
+          }
+          KOTLIN
+
+          cat > app/src/main/java/com/textile/aiscreenbridge/ScreenTextExtractor.kt <<'KOTLIN'
+          package com.textile.aiscreenbridge
+          import android.view.accessibility.AccessibilityNodeInfo
+          object ScreenTextExtractor {
+              fun extract(root: AccessibilityNodeInfo): String { val out = StringBuilder(); walk(root,out,0); return out.toString() }
+              private fun walk(node: AccessibilityNodeInfo?, out: StringBuilder, depth: Int) {
+                  if (node == null || depth > 30) return
+                  val text = node.text?.toString()?.trim(); val desc = node.contentDescription?.toString()?.trim(); val id = node.viewIdResourceName?.substringAfterLast("/") ?: ""
+                  if (!text.isNullOrBlank()) out.appendLine("Texte: $text")
+                  if (!desc.isNullOrBlank() && desc != text) out.appendLine("Description: $desc")
+                  if (id.isNotBlank()) out.appendLine("Element: $id")
+                  for (i in 0 until node.childCount) walk(node.getChild(i), out, depth + 1)
+              }
+          }
+          KOTLIN
+
+          cat > app/src/main/java/com/textile/aiscreenbridge/PrivacyFilter.kt <<'KOTLIN'
+          package com.textile.aiscreenbridge
+          object PrivacyFilter {
+              fun clean(input: String): String {
+                  var t = input
+                  t = t.replace(Regex("\\b\\d{16}\\b"), "**** **** **** ****")
+                  t = t.replace(Regex("(?i)(password|mot de passe|mdp|passcode|code secret)\\s*[:=]?\\s*\\S+"), "$1: ********")
+                  t = t.replace(Regex("(?i)(api[_ -]?key|token|bearer)\\s*[:=]?\\s*\\S+"), "$1: ********")
+                  t = t.replace(Regex("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}"), "[email masqué]")
+                  return t
+              }
+          }
+          KOTLIN
+
+          cat > app/src/main/java/com/textile/aiscreenbridge/OpenAiClient.kt <<'KOTLIN'
+          package com.textile.aiscreenbridge
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.withContext
+          import okhttp3.*
+          import okhttp3.MediaType.Companion.toMediaType
+          import org.json.JSONArray
+          import org.json.JSONObject
+          object OpenAiClient {
+              private val client = OkHttpClient(); private val mediaType = "application/json; charset=utf-8".toMediaType()
+              suspend fun ask(apiKey: String, model: String, userPrompt: String, screenContext: String): String = withContext(Dispatchers.IO) {
+                  try {
+                      val body = JSONObject().put("model", model.ifBlank { "gpt-4.1-mini" }).put("input", JSONArray().put(JSONObject().put("role","system").put("content","Réponds en français simple avec une action claire.")).put(JSONObject().put("role","user").put("content","$userPrompt\n\nCONTEXTE ÉCRAN:\n$screenContext")))
+                      val req = Request.Builder().url("https://api.openai.com/v1/responses").addHeader("Authorization","Bearer $apiKey").post(RequestBody.create(mediaType, body.toString())).build()
+                      client.newCall(req).execute().use { res -> val raw = res.body?.string() ?: ""; if (!res.isSuccessful) return@withContext "Erreur OpenAI: ${res.code}\n$raw"; val output = JSONObject(raw).optJSONArray("output") ?: return@withContext raw.take(1000); val text = StringBuilder(); for (i in 0 until output.length()) { val content = output.getJSONObject(i).optJSONArray("content") ?: continue; for (j in 0 until content.length()) text.append(content.getJSONObject(j).optString("text")) }; text.toString().ifBlank { raw.take(1000) } }
+                  } catch (e: Exception) { "Erreur OpenAI: ${e.message}" }
+              }
+          }
+          KOTLIN
+
+          cat > app/src/main/java/com/textile/aiscreenbridge/ClaudeClient.kt <<'KOTLIN'
+          package com.textile.aiscreenbridge
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.withContext
+          import okhttp3.*
+          import okhttp3.MediaType.Companion.toMediaType
+          import org.json.JSONArray
+          import org.json.JSONObject
+          object ClaudeClient {
+              private val client = OkHttpClient(); private val mediaType = "application/json; charset=utf-8".toMediaType()
+              suspend fun ask(apiKey: String, model: String, userPrompt: String, screenContext: String): String = withContext(Dispatchers.IO) {
+                  try {
+                      val body = JSONObject().put("model", model.ifBlank { "claude-sonnet-4-5" }).put("max_tokens",700).put("system","Réponds en français simple avec une action claire.").put("messages", JSONArray().put(JSONObject().put("role","user").put("content","$userPrompt\n\nCONTEXTE ÉCRAN:\n$screenContext")))
+                      val req = Request.Builder().url("https://api.anthropic.com/v1/messages").addHeader("x-api-key",apiKey).addHeader("anthropic-version","2023-06-01").post(RequestBody.create(mediaType, body.toString())).build()
+                      client.newCall(req).execute().use { res -> val raw = res.body?.string() ?: ""; if (!res.isSuccessful) return@withContext "Erreur Claude: ${res.code}\n$raw"; val content = JSONObject(raw).optJSONArray("content") ?: return@withContext raw.take(1000); val text = StringBuilder(); for (i in 0 until content.length()) text.append(content.getJSONObject(i).optString("text")); text.toString().ifBlank { raw.take(1000) } }
+                  } catch (e: Exception) { "Erreur Claude: ${e.message}" }
+              }
+          }
+          KOTLIN
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.10.2
+
+      - name: Build APK
+        run: gradle assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: AI-Screen-Bridge-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+          
