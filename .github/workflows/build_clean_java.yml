@@ -1,0 +1,536 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Create Android project
+        run: |
+          rm -rf app
+          mkdir -p app/src/main/java/com/textile/aiscreenbridge
+          mkdir -p app/src/main/res/xml
+          mkdir -p app/src/main/res/values
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "AIScreenBridge"
+          include ":app"
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id "com.android.application" version "8.7.3" apply false
+          }
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id "com.android.application"
+          }
+
+          android {
+              namespace "com.textile.aiscreenbridge"
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId "com.textile.aiscreenbridge"
+                  minSdk 26
+                  targetSdk 35
+                  versionCode 4
+                  versionName "1.3"
+              }
+          }
+
+          dependencies {
+              implementation "com.squareup.okhttp3:okhttp:4.12.0"
+          }
+          EOF
+
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <resources>
+              <string name="app_name">AI Screen Bridge</string>
+              <string name="accessibility_description">AI Screen Bridge lit le texte visible de l ecran avec votre autorisation.</string>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/values/styles.xml <<'EOF'
+          <resources>
+              <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:colorAccent">#222222</item>
+              </style>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/xml/accessibility_service_config.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:description="@string/accessibility_description"
+              android:accessibilityEventTypes="typeWindowContentChanged|typeWindowStateChanged|typeViewTextChanged|typeViewClicked|typeViewFocused"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:notificationTimeout="500"
+              android:canRetrieveWindowContent="true"
+              android:canPerformGestures="false"
+              android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"/>
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+
+              <application
+                  android:theme="@style/AppTheme"
+                  android:label="AI Screen Bridge"
+                  android:allowBackup="false"
+                  android:usesCleartextTraffic="false">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".ScreenAccessibilityService"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService"/>
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_service_config"/>
+                  </service>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/textile/aiscreenbridge/MainActivity.java <<'EOF'
+          package com.textile.aiscreenbridge;
+
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.net.Uri;
+          import android.os.Bundle;
+          import android.provider.Settings;
+          import android.view.Gravity;
+          import android.widget.ArrayAdapter;
+          import android.widget.Button;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.Spinner;
+          import android.widget.TextView;
+
+          public class MainActivity extends Activity {
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  SharedPreferences prefs = getSharedPreferences("config", MODE_PRIVATE);
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(32, 42, 32, 32);
+
+                  TextView title = new TextView(this);
+                  title.setText("AI Screen Bridge");
+                  title.setTextSize(24);
+                  title.setGravity(Gravity.CENTER);
+
+                  TextView info = new TextView(this);
+                  info.setText("Lit le texte visible avec Accessibilite. Appuie sur la bulle AI pour envoyer le contexte a OpenAI ou Claude.");
+                  info.setTextSize(15);
+                  info.setPadding(0, 20, 0, 20);
+
+                  Spinner provider = new Spinner(this);
+                  provider.setAdapter(new ArrayAdapter<String>(this, android.R.layout.simple_spinner_dropdown_item, new String[]{"OpenAI", "Claude"}));
+                  provider.setSelection(prefs.getInt("provider", 0));
+
+                  EditText key = new EditText(this);
+                  key.setHint("Cle API");
+                  key.setSingleLine(true);
+                  key.setText(prefs.getString("key", ""));
+
+                  EditText model = new EditText(this);
+                  model.setHint("Modele");
+                  model.setSingleLine(true);
+                  model.setText(prefs.getString("model", "gpt-4.1-mini"));
+
+                  EditText prompt = new EditText(this);
+                  prompt.setHint("Demande a l IA");
+                  prompt.setMinLines(3);
+                  prompt.setText(prefs.getString("prompt", "Lis mon ecran et dis moi la prochaine action a faire."));
+
+                  TextView status = new TextView(this);
+                  status.setText("1 Autorise la bulle. 2 Active Accessibilite. 3 Ouvre une autre app et appuie sur AI.");
+                  status.setPadding(0, 20, 0, 0);
+
+                  Button save = new Button(this);
+                  save.setText("Enregistrer");
+                  save.setOnClickListener(v -> {
+                      prefs.edit()
+                              .putInt("provider", provider.getSelectedItemPosition())
+                              .putString("key", key.getText().toString().trim())
+                              .putString("model", model.getText().toString().trim())
+                              .putString("prompt", prompt.getText().toString().trim())
+                              .apply();
+                      status.setText("Configuration enregistree.");
+                  });
+
+                  Button overlay = new Button(this);
+                  overlay.setText("Autoriser la bulle flottante");
+                  overlay.setOnClickListener(v -> {
+                      if (!Settings.canDrawOverlays(this)) {
+                          Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName()));
+                          startActivity(intent);
+                      }
+                  });
+
+                  Button access = new Button(this);
+                  access.setText("Activer Accessibilite");
+                  access.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
+
+                  root.addView(title);
+                  root.addView(info);
+                  root.addView(provider);
+                  root.addView(key);
+                  root.addView(model);
+                  root.addView(prompt);
+                  root.addView(save);
+                  root.addView(overlay);
+                  root.addView(access);
+                  root.addView(status);
+
+                  setContentView(root);
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/textile/aiscreenbridge/ScreenAccessibilityService.java <<'EOF'
+          package com.textile.aiscreenbridge;
+
+          import android.accessibilityservice.AccessibilityService;
+          import android.content.SharedPreferences;
+          import android.graphics.PixelFormat;
+          import android.os.Build;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.WindowManager;
+          import android.view.accessibility.AccessibilityEvent;
+          import android.view.accessibility.AccessibilityNodeInfo;
+          import android.widget.Button;
+          import android.widget.TextView;
+
+          public class ScreenAccessibilityService extends AccessibilityService {
+              private String lastText = "";
+              private long lastSend = 0L;
+              private WindowManager wm;
+              private TextView result;
+              private Button bubble;
+              private final Handler main = new Handler(Looper.getMainLooper());
+
+              @Override
+              protected void onServiceConnected() {
+                  super.onServiceConnected();
+                  createOverlay();
+              }
+
+              @Override
+              public void onAccessibilityEvent(AccessibilityEvent event) {
+                  AccessibilityNodeInfo root = getRootInActiveWindow();
+                  if (root == null) return;
+                  String text = ScreenTextExtractor.extract(root);
+                  if (text != null && text.trim().length() > 0) {
+                      lastText = PrivacyFilter.clean(text);
+                      if (lastText.length() > 6000) lastText = lastText.substring(0, 6000);
+                  }
+              }
+
+              @Override
+              public void onInterrupt() {
+              }
+
+              private void createOverlay() {
+                  wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+                  int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                          ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                          : WindowManager.LayoutParams.TYPE_PHONE;
+
+                  bubble = new Button(this);
+                  bubble.setText("AI");
+                  bubble.setOnClickListener(v -> sendToAi());
+
+                  result = new TextView(this);
+                  result.setText("AI actif");
+                  result.setVisibility(View.GONE);
+                  result.setPadding(18, 14, 18, 14);
+                  result.setBackgroundColor(0xEEFFFFFF);
+
+                  try {
+                      WindowManager.LayoutParams b = new WindowManager.LayoutParams(
+                              160, 160, type,
+                              WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                              PixelFormat.TRANSLUCENT);
+                      b.gravity = Gravity.TOP | Gravity.RIGHT;
+                      b.x = 25;
+                      b.y = 240;
+                      wm.addView(bubble, b);
+
+                      WindowManager.LayoutParams r = new WindowManager.LayoutParams(
+                              WindowManager.LayoutParams.MATCH_PARENT,
+                              WindowManager.LayoutParams.WRAP_CONTENT,
+                              type,
+                              WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                              PixelFormat.TRANSLUCENT);
+                      r.gravity = Gravity.BOTTOM;
+                      r.y = 80;
+                      wm.addView(result, r);
+                  } catch (Exception ignored) {
+                  }
+              }
+
+              private void sendToAi() {
+                  if (System.currentTimeMillis() - lastSend < 3000) return;
+                  lastSend = System.currentTimeMillis();
+
+                  if (lastText == null || lastText.trim().isEmpty()) {
+                      show("Aucun texte lisible detecte.");
+                      return;
+                  }
+
+                  SharedPreferences prefs = getSharedPreferences("config", MODE_PRIVATE);
+                  String key = prefs.getString("key", "");
+                  String model = prefs.getString("model", "gpt-4.1-mini");
+                  String prompt = prefs.getString("prompt", "");
+                  int provider = prefs.getInt("provider", 0);
+
+                  if (key == null || key.trim().isEmpty()) {
+                      show("Ajoute ta cle API dans l application.");
+                      return;
+                  }
+
+                  show("Analyse IA en cours...");
+                  new Thread(() -> {
+                      String answer = AiClient.ask(provider, key, model, prompt, lastText);
+                      main.post(() -> show(answer));
+                  }).start();
+              }
+
+              private void show(String text) {
+                  if (result == null) return;
+                  result.setVisibility(View.VISIBLE);
+                  if (text == null) text = "";
+                  result.setText(text.length() > 1500 ? text.substring(0, 1500) : text);
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/textile/aiscreenbridge/ScreenTextExtractor.java <<'EOF'
+          package com.textile.aiscreenbridge;
+
+          import android.view.accessibility.AccessibilityNodeInfo;
+
+          public class ScreenTextExtractor {
+              public static String extract(AccessibilityNodeInfo root) {
+                  StringBuilder out = new StringBuilder();
+                  walk(root, out, 0);
+                  return out.toString();
+              }
+
+              private static void walk(AccessibilityNodeInfo node, StringBuilder out, int depth) {
+                  if (node == null || depth > 30) return;
+
+                  CharSequence text = node.getText();
+                  CharSequence desc = node.getContentDescription();
+
+                  if (text != null && text.toString().trim().length() > 0) {
+                      out.append(text.toString().trim()).append("\n");
+                  }
+
+                  if (desc != null && desc.toString().trim().length() > 0) {
+                      String d = desc.toString().trim();
+                      if (text == null || !d.equals(text.toString().trim())) {
+                          out.append(d).append("\n");
+                      }
+                  }
+
+                  for (int i = 0; i < node.getChildCount(); i++) {
+                      walk(node.getChild(i), out, depth + 1);
+                  }
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/textile/aiscreenbridge/PrivacyFilter.java <<'EOF'
+          package com.textile.aiscreenbridge;
+
+          public class PrivacyFilter {
+              public static String clean(String input) {
+                  if (input == null) return "";
+                  String t = input;
+                  t = t.replaceAll("\\b\\d{16}\\b", "**** **** **** ****");
+                  t = t.replaceAll("(?i)(password|mot de passe|mdp|passcode|code secret)\\s*[:=]?\\s*\\S+", "$1: ********");
+                  t = t.replaceAll("(?i)(api[_ -]?key|token|bearer)\\s*[:=]?\\s*\\S+", "$1: ********");
+                  t = t.replaceAll("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", "[email masque]");
+                  return t;
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/textile/aiscreenbridge/AiClient.java <<'EOF'
+          package com.textile.aiscreenbridge;
+
+          import okhttp3.MediaType;
+          import okhttp3.OkHttpClient;
+          import okhttp3.Request;
+          import okhttp3.RequestBody;
+          import okhttp3.Response;
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+
+          public class AiClient {
+              private static final OkHttpClient client = new OkHttpClient();
+              private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
+
+              public static String ask(int provider, String key, String model, String prompt, String screen) {
+                  try {
+                      if (provider == 0) return askOpenAi(key, model, prompt, screen);
+                      return askClaude(key, model, prompt, screen);
+                  } catch (Exception e) {
+                      return "Erreur: " + e.getMessage();
+                  }
+              }
+
+              private static String askOpenAi(String key, String model, String prompt, String screen) throws Exception {
+                  String finalModel = model == null || model.trim().isEmpty() ? "gpt-4.1-mini" : model.trim();
+
+                  JSONObject body = new JSONObject();
+                  body.put("model", finalModel);
+
+                  JSONArray input = new JSONArray();
+                  input.put(new JSONObject()
+                          .put("role", "system")
+                          .put("content", "Reponds en francais simple avec une seule prochaine action claire."));
+                  input.put(new JSONObject()
+                          .put("role", "user")
+                          .put("content", prompt + "\n\nECRAN:\n" + screen));
+                  body.put("input", input);
+
+                  Request req = new Request.Builder()
+                          .url("https://api.openai.com/v1/responses")
+                          .addHeader("Authorization", "Bearer " + key)
+                          .post(RequestBody.create(body.toString(), JSON))
+                          .build();
+
+                  try (Response res = client.newCall(req).execute()) {
+                      String raw = res.body() == null ? "" : res.body().string();
+                      if (!res.isSuccessful()) return "Erreur OpenAI " + res.code() + ": " + raw;
+
+                      JSONObject json = new JSONObject(raw);
+                      JSONArray output = json.optJSONArray("output");
+                      if (output == null) return raw.length() > 1200 ? raw.substring(0, 1200) : raw;
+
+                      StringBuilder text = new StringBuilder();
+                      for (int i = 0; i < output.length(); i++) {
+                          JSONObject item = output.optJSONObject(i);
+                          if (item == null) continue;
+                          JSONArray content = item.optJSONArray("content");
+                          if (content == null) continue;
+                          for (int j = 0; j < content.length(); j++) {
+                              JSONObject c = content.optJSONObject(j);
+                              if (c != null) text.append(c.optString("text"));
+                          }
+                      }
+                      String s = text.toString();
+                      return s.trim().isEmpty() ? raw : s;
+                  }
+              }
+
+              private static String askClaude(String key, String model, String prompt, String screen) throws Exception {
+                  String finalModel = model == null || model.trim().isEmpty() ? "claude-sonnet-4-5" : model.trim();
+
+                  JSONObject body = new JSONObject();
+                  body.put("model", finalModel);
+                  body.put("max_tokens", 700);
+                  body.put("system", "Reponds en francais simple avec une seule prochaine action claire.");
+
+                  JSONArray messages = new JSONArray();
+                  messages.put(new JSONObject()
+                          .put("role", "user")
+                          .put("content", prompt + "\n\nECRAN:\n" + screen));
+                  body.put("messages", messages);
+
+                  Request req = new Request.Builder()
+                          .url("https://api.anthropic.com/v1/messages")
+                          .addHeader("x-api-key", key)
+                          .addHeader("anthropic-version", "2023-06-01")
+                          .post(RequestBody.create(body.toString(), JSON))
+                          .build();
+
+                  try (Response res = client.newCall(req).execute()) {
+                      String raw = res.body() == null ? "" : res.body().string();
+                      if (!res.isSuccessful()) return "Erreur Claude " + res.code() + ": " + raw;
+
+                      JSONObject json = new JSONObject(raw);
+                      JSONArray content = json.optJSONArray("content");
+                      if (content == null) return raw.length() > 1200 ? raw.substring(0, 1200) : raw;
+
+                      StringBuilder text = new StringBuilder();
+                      for (int i = 0; i < content.length(); i++) {
+                          JSONObject c = content.optJSONObject(i);
+                          if (c != null) text.append(c.optString("text"));
+                      }
+                      String s = text.toString();
+                      return s.trim().isEmpty() ? raw : s;
+                  }
+              }
+          }
+          EOF
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.10.2
+
+      - name: Build APK
+        run: gradle assembleDebug --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: AI-Screen-Bridge-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
